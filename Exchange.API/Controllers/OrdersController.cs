@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using Exchange.Core.Engine;
 using Exchange.Core.Models;
+using Exchange.Core.Persistence.Repositories;
 
 namespace Exchange.API.Controllers;
 
@@ -101,6 +102,30 @@ public class OrdersController : ControllerBase
             tradesExecuted = totalTrades
         });
     }
+
+    // GET api/orders/trades/BTC%2FUSD
+[HttpGet("trades/{tradingPair}")]
+public async Task<IActionResult> GetRecentTrades(
+    string tradingPair,
+    [FromServices] TradeRepository repo)
+{
+    var pair   = Uri.UnescapeDataString(tradingPair).ToUpper();
+    var trades = await repo.GetRecentTradesAsync(pair, 50);
+
+    return Ok(trades.Select(t => new
+    {
+        t.Id,
+        t.TradingPair,
+        t.Price,
+        t.Quantity,
+        t.TotalValue,
+        t.BuyerUserId,
+        t.SellerUserId,
+        t.ExecutedAt,
+        t.PersistedAt,
+        latencyMs = (t.PersistedAt - t.ExecutedAt).TotalMilliseconds
+    }));
+}
 }
 
 // The shape of the incoming HTTP request body

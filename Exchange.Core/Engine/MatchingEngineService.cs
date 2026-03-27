@@ -13,6 +13,8 @@ public class MatchingEngineService : BackgroundService
     private readonly OrderChannel _orderChannel;
     private readonly ILogger<MatchingEngineService> _logger;
 
+    private readonly SettlementChannel _settlementChannel;
+
     // This is the broadcast callback — the API injects this
     // when it registers the service
     private Func<Trade, Task>? _onTradeExecuted;
@@ -23,10 +25,12 @@ public class MatchingEngineService : BackgroundService
     public MatchingEngineService(
         MatchingEngine engine,
         OrderChannel orderChannel,
+            SettlementChannel settlementChannel, 
         ILogger<MatchingEngineService> logger)
     {
         _engine = engine;
         _orderChannel = orderChannel;
+        _settlementChannel = settlementChannel;
         _logger = logger;
     }
 
@@ -52,26 +56,21 @@ public class MatchingEngineService : BackgroundService
                 Interlocked.Add(ref _totalTrades, trades.Count);
 
                 // Broadcast each trade the moment it executes
-                foreach (var trade in trades)
-                {
-                    _logger.LogInformation(
-                        "TRADE | {Pair} | {Qty} @ {Price:C} | " +
-                        "Buyer: {Buyer} | Seller: {Seller}",
-                        trade.TradingPair,
-                        trade.Quantity,
-                        trade.Price,
-                        trade.BuyerUserId,
-                        trade.SellerUserId
-                    );
+               foreach (var trade in trades)
+{
+    _logger.LogInformation(
+        "TRADE | {Pair} | {Qty} @ {Price:C} | Buyer: {Buyer} | Seller: {Seller}",
+        trade.TradingPair, trade.Quantity, trade.Price,
+        trade.BuyerUserId, trade.SellerUserId
+    );
 
-                    // Fire the broadcast callback if wired up
-                    if (_onTradeExecuted != null)
-                    {
-                        // Don't await — fire and forget
-                        // Engine never waits for SignalR
-                        _ = Task.Run(() => _onTradeExecuted(trade), stoppingToken);
-                    }
-                }
+    // 1. Push to SignalR — fire and forget, engine doesn't wait
+    if (_onTradeExecuted != null)
+        _ = Task.Run(() => _onTradeExecuted(trade), stoppingToken);
+
+    // 2. Push to settlement channel — engine doesn't wait for DB
+    await _settlementChannel.Writer.WriteAsync(trade, stoppingToken);
+}
 
                 if (_totalProcessed % 1000 == 0)
                 {

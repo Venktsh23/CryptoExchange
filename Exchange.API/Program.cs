@@ -1,47 +1,66 @@
 using Exchange.Core.Engine;
 using Exchange.Core.Models;
+using Exchange.Core.Persistence;
+using Exchange.Core.Persistence.Repositories;
 using Exchange.API.Hubs;
 using Microsoft.AspNetCore.SignalR;
+using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddControllers();
-
-// Add SignalR
 builder.Services.AddSignalR();
 
-// Allow the browser HTML file to connect
-// (since it opens from file://, not localhost)
 builder.Services.AddCors(options =>
 {
     options.AddDefaultPolicy(policy =>
     {
         policy
-            .SetIsOriginAllowed(_ => true)  // Allow any origin in dev
+            .SetIsOriginAllowed(_ => true)
             .AllowAnyHeader()
             .AllowAnyMethod()
-            .AllowCredentials();            // Required for SignalR
+            .AllowCredentials();
     });
 });
 
+// PostgreSQL — connection string from config
+builder.Services.AddDbContext<ExchangeDbContext>(options =>
+    options.UseNpgsql(
+        builder.Configuration.GetConnectionString("Postgres")
+    )
+);
+
+// Repository — scoped because DbContext is scoped
+builder.Services.AddScoped<TradeRepository>();
+
+// Engine services — singletons
 builder.Services.AddSingleton<MatchingEngine>();
 builder.Services.AddSingleton<OrderChannel>();
+builder.Services.AddSingleton<SettlementChannel>();
 builder.Services.AddSingleton<MatchingEngineService>();
-builder.Services.AddHostedService(sp => sp.GetRequiredService<MatchingEngineService>());
+
+// Hosted services
+builder.Services.AddHostedService(sp =>
+    sp.GetRequiredService<MatchingEngineService>());
+builder.Services.AddHostedService<SettlementWorker>();
 
 var app = builder.Build();
 
+// Auto-create database tables on startup
+using (var scope = app.Services.CreateScope())
+{
+    var db = scope.ServiceProvider.GetRequiredService<ExchangeDbContext>();
+    await db.Database.MigrateAsync();
+}
+
 app.UseCors();
 
-// Wire up the SignalR broadcast to the engine
-// This runs once at startup — connects the engine to the hub
+// Wire SignalR to engine
 var engineService = app.Services.GetRequiredService<MatchingEngineService>();
 var hubContext    = app.Services.GetRequiredService<IHubContext<MarketDataHub>>();
 
 engineService.SetTradeCallback(async (Trade trade) =>
 {
-    // Broadcast to everyone in the trading pair group
-    // e.g. all subscribers of "BTC/USD" get this message
     await hubContext.Clients
         .Group(trade.TradingPair)
         .SendAsync("TradeExecuted", new
@@ -55,7 +74,6 @@ engineService.SetTradeCallback(async (Trade trade) =>
             executedAt   = trade.ExecutedAt
         });
 
-    // Also broadcast latest price to pair's price feed
     await hubContext.Clients
         .Group(trade.TradingPair)
         .SendAsync("PriceUpdated", new
@@ -67,8 +85,6 @@ engineService.SetTradeCallback(async (Trade trade) =>
 });
 
 app.MapControllers();
-
-// Map the SignalR hub to a URL endpoint
 app.MapHub<MarketDataHub>("/hubs/marketdata");
 
 app.Run();
