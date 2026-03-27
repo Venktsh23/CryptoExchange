@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="Exchange.API/Exchange.API.csproj" />
+  <Project Path="Exchange.Core/Exchange.Core.csproj" />
+  <Project Path="Exchange.TestRunner/Exchange.TestRunner.csproj" />
+</Solution>
