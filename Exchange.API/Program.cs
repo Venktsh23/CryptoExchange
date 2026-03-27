@@ -5,8 +5,28 @@ using Exchange.Core.Persistence.Repositories;
 using Exchange.API.Hubs;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
+using Serilog;
+using Serilog.Events;
+
+// Configure Serilog before anything else
+// If the app crashes during startup, we still get logs
+Log.Logger = new LoggerConfiguration()
+    .MinimumLevel.Information()
+    .MinimumLevel.Override("Microsoft", LogEventLevel.Warning)
+    .MinimumLevel.Override("Microsoft.EntityFrameworkCore.Database.Command", LogEventLevel.Warning)
+    .Enrich.FromLogContext()
+    .WriteTo.Console(outputTemplate:
+        "[{Timestamp:HH:mm:ss.fff} {Level:u3}] [{ThreadId}] {Message:lj}{NewLine}{Exception}")
+    .WriteTo.File(
+        path: "logs/exchange-.log",
+        rollingInterval: RollingInterval.Day,
+        outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss.fff} [{Level:u3}] [{ThreadId}] {Message:lj}{NewLine}{Exception}",
+        retainedFileCountLimit: 30   // Keep 30 days of logs
+    )
+    .CreateLogger();
 
 var builder = WebApplication.CreateBuilder(args);
+builder.Host.UseSerilog(); // Replace default logging with Serilog
 
 builder.Services.AddControllers();
 builder.Services.AddSignalR();
@@ -38,6 +58,7 @@ builder.Services.AddSingleton<MatchingEngine>();
 builder.Services.AddSingleton<OrderChannel>();
 builder.Services.AddSingleton<SettlementChannel>();
 builder.Services.AddSingleton<MatchingEngineService>();
+builder.Services.AddHostedService<SnapshotService>();
 
 // Hosted services
 builder.Services.AddHostedService(sp =>

@@ -10,6 +10,8 @@ public class ExchangeDbContext : DbContext
 
     public DbSet<TradeEntity> Trades => Set<TradeEntity>();
 
+    public DbSet<OrderBookSnapshotEntity> OrderBookSnapshots => Set<OrderBookSnapshotEntity>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<TradeEntity>(entity =>
@@ -33,5 +35,14 @@ public class ExchangeDbContext : DbContext
             entity.Property(t => t.TotalValue)
                   .HasPrecision(18, 8);
         });
+
+        modelBuilder.Entity<OrderBookSnapshotEntity>(entity =>
+{
+    entity.HasKey(s => s.Id);
+    entity.HasIndex(s => new { s.TradingPair, s.CreatedAt });
+
+    // Only keep latest 12 snapshots per pair (1 hour of history at 5min intervals)
+    // Older ones pruned by the snapshot service
+});
     }
 }

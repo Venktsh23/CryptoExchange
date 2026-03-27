@@ -1,6 +1,8 @@
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.DependencyInjection;
+using Polly;
+using Polly.Retry;
 using Exchange.Core.Models;
 using Exchange.Core.Persistence.Repositories;
 
@@ -12,13 +14,16 @@ public class SettlementWorker : BackgroundService
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<SettlementWorker> _logger;
 
-    // Batch settings — saves every 100 trades OR every 2 seconds
-    // whichever comes first
-    private const int BatchSize        = 100;
-    private const int BatchTimeoutMs   = 2000;
+    private const int BatchSize      = 100;
+    private const int BatchTimeoutMs = 2000;
 
-    private long _totalSaved  = 0;
+    private long _totalSaved   = 0;
     private long _totalBatches = 0;
+    private long _totalRetries = 0;
+
+    // Polly retry pipeline
+    // If DB save fails: wait 2s, try again. Then 4s. Then 8s. Then give up and log.
+    private readonly ResiliencePipeline _retryPipeline;
 
     public SettlementWorker(
         SettlementChannel settlementChannel,
@@ -28,6 +33,38 @@ public class SettlementWorker : BackgroundService
         _settlementChannel = settlementChannel;
         _scopeFactory      = scopeFactory;
         _logger            = logger;
+
+        // Build the Polly resilience pipeline
+        _retryPipeline = new ResiliencePipelineBuilder()
+            .AddRetry(new RetryStrategyOptions
+            {
+                // Retry on ANY exception — DB down, timeout, network blip
+                ShouldHandle = new PredicateBuilder()
+                    .Handle<Exception>(),
+
+                MaxRetryAttempts = 5,
+
+                // Exponential backoff: 2s, 4s, 8s, 16s, 32s
+                DelayGenerator = static args =>
+                {
+                    var delay = TimeSpan.FromSeconds(Math.Pow(2, args.AttemptNumber + 1));
+                    return ValueTask.FromResult<TimeSpan?>(delay);
+                },
+
+                // Log every retry attempt
+                OnRetry = args =>
+                {
+                    logger.LogWarning(
+                        "DB save failed (attempt {Attempt}). " +
+                        "Retrying in {Delay}s. Error: {Error}",
+                        args.AttemptNumber + 1,
+                        Math.Pow(2, args.AttemptNumber + 1),
+                        args.Outcome.Exception?.Message
+                    );
+                    return ValueTask.CompletedTask;
+                }
+            })
+            .Build();
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -40,12 +77,11 @@ public class SettlementWorker : BackgroundService
         {
             try
             {
-                // Try to fill a batch within the timeout window
+                // Fill batch within timeout window
                 var batchDeadline = DateTime.UtcNow.AddMilliseconds(BatchTimeoutMs);
 
                 while (batch.Count < BatchSize && DateTime.UtcNow < batchDeadline)
                 {
-                    // Wait up to remaining time for next trade
                     var remaining = batchDeadline - DateTime.UtcNow;
                     if (remaining <= TimeSpan.Zero) break;
 
@@ -61,49 +97,70 @@ public class SettlementWorker : BackgroundService
                     }
                     catch (OperationCanceledException)
                     {
-                        // Timeout reached — save whatever we have
                         break;
                     }
                 }
 
-                // Save batch if we have anything
                 if (batch.Count > 0)
                 {
-                    await SaveBatchAsync(batch, stoppingToken);
+                    // Polly wraps the save — handles retries automatically
+                    await _retryPipeline.ExecuteAsync(
+                        async ct => await SaveBatchAsync(batch, ct),
+                        stoppingToken
+                    );
+
                     batch.Clear();
                 }
             }
             catch (Exception ex) when (!stoppingToken.IsCancellationRequested)
             {
-                _logger.LogError(ex, "Settlement worker error — retrying in 5s");
-                await Task.Delay(5000, stoppingToken);
+                // All retries exhausted — log and keep the batch for next attempt
+                _logger.LogError(ex,
+                    "All retry attempts exhausted for batch of {Count} trades. " +
+                    "Trades remain in memory — will retry on next cycle.",
+                    batch.Count
+                );
+
+                // Wait before next cycle to avoid hammering a dead DB
+                await Task.Delay(10_000, stoppingToken);
             }
         }
 
-        // Drain remaining trades on shutdown
-        _logger.LogInformation("Settlement Worker shutting down — draining remaining trades...");
+        // Graceful shutdown — drain remaining trades
+        _logger.LogInformation(
+            "Settlement Worker shutting down — draining remaining trades...");
+
         while (_settlementChannel.Reader.TryRead(out var trade))
             batch.Add(trade);
 
         if (batch.Count > 0)
-            await SaveBatchAsync(batch, CancellationToken.None);
+        {
+            _logger.LogInformation(
+                "Saving final batch of {Count} trades before shutdown", batch.Count);
 
-        _logger.LogInformation("Settlement Worker stopped. Total saved: {Total}", _totalSaved);
+            await _retryPipeline.ExecuteAsync(
+                async ct => await SaveBatchAsync(batch, ct),
+                CancellationToken.None
+            );
+        }
+
+        _logger.LogInformation(
+            "Settlement Worker stopped. Total saved: {Total} in {Batches} batches | " +
+            "Total retries: {Retries}",
+            _totalSaved, _totalBatches, _totalRetries
+        );
     }
 
     private async Task SaveBatchAsync(List<Trade> batch, CancellationToken ct)
     {
-        // IServiceScopeFactory creates a fresh DbContext per batch
-        // DbContext is not thread-safe — never share it across scopes
         using var scope = _scopeFactory.CreateScope();
         var repo = scope.ServiceProvider.GetRequiredService<TradeRepository>();
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
-
         await repo.SaveTradesBatchAsync(batch);
-
         sw.Stop();
-        _totalSaved  += batch.Count;
+
+        _totalSaved   += batch.Count;
         _totalBatches++;
 
         _logger.LogInformation(

@@ -204,4 +204,12 @@ public class MatchingEngine
 
         return (totalOrders, totalTrades);
     }
+
+    public IEnumerable<string> GetActiveTradingPairs()
+{
+    lock (_lock)
+    {
+        return _orderBooks.Keys.ToList();
+    }
+}
 }
