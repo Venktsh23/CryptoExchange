@@ -4,15 +4,19 @@ using Exchange.Core.Models;
 
 namespace Exchange.Core.Engine;
 
-// BackgroundService = a .NET built-in that runs a loop
-// for the entire lifetime of your application
+// We use an Action callback instead of IHubContext directly
+// because Exchange.Core has no reference to SignalR
+// The API project will inject the broadcast function
 public class MatchingEngineService : BackgroundService
 {
     private readonly MatchingEngine _engine;
     private readonly OrderChannel _orderChannel;
     private readonly ILogger<MatchingEngineService> _logger;
 
-    // Tracks total trades and processing time for stats
+    // This is the broadcast callback — the API injects this
+    // when it registers the service
+    private Func<Trade, Task>? _onTradeExecuted;
+
     private long _totalProcessed = 0;
     private long _totalTrades = 0;
 
@@ -26,58 +30,61 @@ public class MatchingEngineService : BackgroundService
         _logger = logger;
     }
 
-    // This method runs from app start until app shutdown
+    // The API calls this once at startup to wire up broadcasting
+    public void SetTradeCallback(Func<Trade, Task> callback)
+    {
+        _onTradeExecuted = callback;
+    }
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         _logger.LogInformation("Matching Engine started. Waiting for orders...");
 
-        // ReadAllAsync — blocks efficiently when channel is empty
-        // Wakes up instantly when an order arrives
-        // Stops cleanly when the app shuts down (stoppingToken)
         await foreach (var order in _orderChannel.Reader.ReadAllAsync(stoppingToken))
         {
             try
             {
                 var started = DateTime.UtcNow;
-
                 var trades = _engine.ProcessOrder(order);
-
                 var elapsed = (DateTime.UtcNow - started).TotalMilliseconds;
 
                 Interlocked.Increment(ref _totalProcessed);
                 Interlocked.Add(ref _totalTrades, trades.Count);
 
-                if (trades.Count > 0)
+                // Broadcast each trade the moment it executes
+                foreach (var trade in trades)
                 {
-                    foreach (var trade in trades)
+                    _logger.LogInformation(
+                        "TRADE | {Pair} | {Qty} @ {Price:C} | " +
+                        "Buyer: {Buyer} | Seller: {Seller}",
+                        trade.TradingPair,
+                        trade.Quantity,
+                        trade.Price,
+                        trade.BuyerUserId,
+                        trade.SellerUserId
+                    );
+
+                    // Fire the broadcast callback if wired up
+                    if (_onTradeExecuted != null)
                     {
-                        _logger.LogInformation(
-                            "TRADE EXECUTED | Pair: {Pair} | Price: {Price:C} | " +
-                            "Qty: {Qty} | Value: {Value:C} | Buyer: {Buyer} | Seller: {Seller}",
-                            trade.TradingPair,
-                            trade.Price,
-                            trade.Quantity,
-                            trade.TotalValue,
-                            trade.BuyerUserId,
-                            trade.SellerUserId
-                        );
+                        // Don't await — fire and forget
+                        // Engine never waits for SignalR
+                        _ = Task.Run(() => _onTradeExecuted(trade), stoppingToken);
                     }
                 }
 
-                // Log every 1000 orders to track throughput
                 if (_totalProcessed % 1000 == 0)
                 {
                     _logger.LogInformation(
-                        "ENGINE STATS | Orders processed: {Orders} | " +
-                        "Trades executed: {Trades} | Last order took: {Ms:F3}ms",
+                        "ENGINE STATS | Processed: {Orders} | " +
+                        "Trades: {Trades} | Last: {Ms:F3}ms",
                         _totalProcessed, _totalTrades, elapsed
                     );
                 }
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex,
-                    "Error processing order {OrderId}", order.Id);
+                _logger.LogError(ex, "Error processing order {OrderId}", order.Id);
             }
         }
 
