@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using Serilog;
 using Serilog.Events;
+using Exchange.Core.Kafka;
 
 // Configure Serilog before anything else
 // If the app crashes during startup, we still get logs
@@ -59,6 +60,15 @@ builder.Services.AddSingleton<OrderChannel>();
 builder.Services.AddSingleton<SettlementChannel>();
 builder.Services.AddSingleton<MatchingEngineService>();
 builder.Services.AddHostedService<SnapshotService>();
+
+// Kafka
+var kafkaSettings = builder.Configuration
+    .GetSection("Kafka")
+    .Get<KafkaSettings>() ?? new KafkaSettings();
+
+builder.Services.AddSingleton(kafkaSettings);
+builder.Services.AddSingleton<TradeProducer>();
+builder.Services.AddHostedService<KafkaSettlementWorker>();
 
 // Hosted services
 builder.Services.AddHostedService(sp =>

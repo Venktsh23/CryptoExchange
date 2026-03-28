@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Exchange.Core.Models;
+using Exchange.Core.Kafka;
 
 namespace Exchange.Core.Engine;
 
@@ -15,6 +16,8 @@ public class MatchingEngineService : BackgroundService
 
     private readonly SettlementChannel _settlementChannel;
 
+    private readonly TradeProducer? _tradeProducer;
+
     // This is the broadcast callback — the API injects this
     // when it registers the service
     private Func<Trade, Task>? _onTradeExecuted;
@@ -22,17 +25,19 @@ public class MatchingEngineService : BackgroundService
     private long _totalProcessed = 0;
     private long _totalTrades = 0;
 
-    public MatchingEngineService(
-        MatchingEngine engine,
-        OrderChannel orderChannel,
-            SettlementChannel settlementChannel, 
-        ILogger<MatchingEngineService> logger)
-    {
-        _engine = engine;
-        _orderChannel = orderChannel;
-        _settlementChannel = settlementChannel;
-        _logger = logger;
-    }
+  public MatchingEngineService(
+    MatchingEngine engine,
+    OrderChannel orderChannel,
+    SettlementChannel settlementChannel,
+    ILogger<MatchingEngineService> logger,
+    TradeProducer? tradeProducer = null)  // Optional — falls back to channel
+{
+    _engine            = engine;
+    _orderChannel      = orderChannel;
+    _settlementChannel = settlementChannel;
+    _logger            = logger;
+    _tradeProducer     = tradeProducer;
+}
 
     // The API calls this once at startup to wire up broadcasting
     public void SetTradeCallback(Func<Trade, Task> callback)
@@ -56,7 +61,7 @@ public class MatchingEngineService : BackgroundService
                 Interlocked.Add(ref _totalTrades, trades.Count);
 
                 // Broadcast each trade the moment it executes
-               foreach (var trade in trades)
+             foreach (var trade in trades)
 {
     _logger.LogInformation(
         "TRADE | {Pair} | {Qty} @ {Price:C} | Buyer: {Buyer} | Seller: {Seller}",
@@ -64,12 +69,35 @@ public class MatchingEngineService : BackgroundService
         trade.BuyerUserId, trade.SellerUserId
     );
 
-    // 1. Push to SignalR — fire and forget, engine doesn't wait
+    // SignalR broadcast — fire and forget
     if (_onTradeExecuted != null)
         _ = Task.Run(() => _onTradeExecuted(trade), stoppingToken);
 
-    // 2. Push to settlement channel — engine doesn't wait for DB
-    await _settlementChannel.Writer.WriteAsync(trade, stoppingToken);
+    // Kafka if available, fall back to direct channel
+    if (_tradeProducer != null)
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await _tradeProducer.PublishTradeAsync(trade);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "Kafka publish failed for trade {TradeId} — " +
+                    "falling back to settlement channel", trade.Id);
+
+                // Fallback — write to channel if Kafka fails
+                await _settlementChannel.Writer.WriteAsync(trade, stoppingToken);
+            }
+        }, stoppingToken);
+    }
+    else
+    {
+        // No Kafka configured — use direct channel
+        await _settlementChannel.Writer.WriteAsync(trade, stoppingToken);
+    }
 }
 
                 if (_totalProcessed % 1000 == 0)
