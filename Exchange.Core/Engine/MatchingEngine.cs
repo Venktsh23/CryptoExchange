@@ -212,4 +212,42 @@ public class MatchingEngine
         return _orderBooks.Keys.ToList();
     }
 }
+
+public void RestoreFromSnapshot(
+    string tradingPair,
+    List<Order> bids,
+    List<Order> asks)
+{
+    lock (_lock)
+    {
+        // Create fresh order book
+        var book = new OrderBook(tradingPair);
+
+        // Restore BUY orders (Bids)
+        foreach (var order in bids
+                     .OrderByDescending(o => o.Price)  // Highest price first
+                     .ThenBy(o => o.CreatedAt))        // FIFO within same price
+        {
+            if (!book.Bids.ContainsKey(order.Price))
+                book.Bids[order.Price] = new Queue<Order>();
+
+            book.Bids[order.Price].Enqueue(order);
+        }
+
+        // Restore SELL orders (Asks)
+        foreach (var order in asks
+                     .OrderBy(o => o.Price)            // Lowest price first
+                     .ThenBy(o => o.CreatedAt))        // FIFO within same price
+        {
+            if (!book.Asks.ContainsKey(order.Price))
+                book.Asks[order.Price] = new Queue<Order>();
+
+            book.Asks[order.Price].Enqueue(order);
+        }
+
+        // Replace or insert into engine
+        _orderBooks[tradingPair] = book;
+    }
+}
+
 }
