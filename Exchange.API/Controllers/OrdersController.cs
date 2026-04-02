@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using Exchange.Core.Engine;
 using Exchange.Core.Models;
 using Exchange.Core.Kafka;
+using Exchange.Core.Accounts;
 
 namespace Exchange.API.Controllers;
 
@@ -9,19 +10,20 @@ namespace Exchange.API.Controllers;
 [Route("api/[controller]")]
 public class OrdersController : ControllerBase
 {
-    private readonly OrderProducer  _orderProducer;
-    private readonly MatchingEngine _engine;
+    private readonly OrderProducer   _orderProducer;
+    private readonly MatchingEngine  _engine;
+    private readonly AccountService  _accountService;
 
     public OrdersController(
-        OrderProducer orderProducer,
-        MatchingEngine engine)
+        OrderProducer  orderProducer,
+        MatchingEngine engine,
+        AccountService accountService)
     {
-        _orderProducer = orderProducer;
-        _engine        = engine;
+        _orderProducer  = orderProducer;
+        _engine         = engine;
+        _accountService = accountService;
     }
 
-    // POST api/orders
-    // Receives an order, publishes it to kafka topic, returns immediately
     [HttpPost]
     public async Task<IActionResult> PlaceOrder(
         [FromBody] PlaceOrderRequest request)
@@ -30,7 +32,10 @@ public class OrdersController : ControllerBase
             return BadRequest("Price and quantity must be greater than zero.");
 
         if (string.IsNullOrWhiteSpace(request.TradingPair))
-            return BadRequest("Trading pair is required. e.g. BTC/USD");
+            return BadRequest("Trading pair required. e.g. BTC/USD");
+
+        if (!request.TradingPair.Contains('/'))
+            return BadRequest("Invalid trading pair format. Use BASE/QUOTE e.g. BTC/USD");
 
         var order = new Order
         {
@@ -41,14 +46,26 @@ public class OrdersController : ControllerBase
             Quantity    = request.Quantity
         };
 
-        // Publish to Kafka — durable, survives crashes
-        // Returns as soon as Kafka confirms receipt
+        // Validate balance and lock funds before accepting order
+        var validationError = await _accountService.ValidateAndLockAsync(
+            orderId:     order.Id,
+            userId:      order.UserId,
+            tradingPair: order.TradingPair,
+            side:        order.Side.ToString(),
+            price:       order.Price,
+            quantity:    order.Quantity
+        );
+
+        if (validationError != null)
+            return BadRequest(new { error = validationError });
+
+        // Funds locked — now safe to publish to Kafka
         await _orderProducer.PublishOrderAsync(order);
 
         return Accepted(new
         {
             orderId     = order.Id,
-            message     = "Order received and queued for matching.",
+            message     = "Order accepted. Funds locked. Queued for matching.",
             tradingPair = order.TradingPair,
             side        = order.Side.ToString(),
             price       = order.Price,
@@ -56,14 +73,13 @@ public class OrdersController : ControllerBase
         });
     }
 
+    // Existing endpoints unchanged below
     [HttpGet("book/{tradingPair}")]
     public IActionResult GetOrderBook(string tradingPair)
     {
         var pair = Uri.UnescapeDataString(tradingPair).ToUpper();
         var book = _engine.GetOrderBook(pair);
-
-        if (book == null)
-            return NotFound($"No order book found for {pair}");
+        if (book == null) return NotFound($"No order book for {pair}");
 
         return Ok(new
         {
@@ -71,17 +87,17 @@ public class OrdersController : ControllerBase
             bestBid     = book.BestBid,
             bestAsk     = book.BestAsk,
             spread      = book.Spread,
-            bids = book.Bids.Take(10).Select(level => new
+            bids = book.Bids.Take(10).Select(l => new
             {
-                price    = level.Key,
-                quantity = level.Value.Sum(o => o.RemainingQuantity),
-                orders   = level.Value.Count
+                price    = l.Key,
+                quantity = l.Value.Sum(o => o.RemainingQuantity),
+                orders   = l.Value.Count
             }),
-            asks = book.Asks.Take(10).Select(level => new
+            asks = book.Asks.Take(10).Select(l => new
             {
-                price    = level.Key,
-                quantity = level.Value.Sum(o => o.RemainingQuantity),
-                orders   = level.Value.Count
+                price    = l.Key,
+                quantity = l.Value.Sum(o => o.RemainingQuantity),
+                orders   = l.Value.Count
             })
         });
     }
@@ -90,8 +106,8 @@ public class OrdersController : ControllerBase
     public IActionResult GetStats(string tradingPair)
     {
         var pair = Uri.UnescapeDataString(tradingPair).ToUpper();
-        var (totalOrders, totalTrades) = _engine.GetStats(pair);
-        return Ok(new { tradingPair = pair, totalOrders, totalTrades });
+        var (orders, trades) = _engine.GetStats(pair);
+        return Ok(new { tradingPair = pair, orders, trades });
     }
 
     [HttpGet("trades/{tradingPair}")]

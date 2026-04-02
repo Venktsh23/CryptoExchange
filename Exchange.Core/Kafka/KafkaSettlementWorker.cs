@@ -154,24 +154,62 @@ public class KafkaSettlementWorker : BackgroundService
     }
 
     private void SaveBatch(List<TradeMessage> batch)
+{
+    using var scope = _scopeFactory.CreateScope();
+    var repo        = scope.ServiceProvider
+        .GetRequiredService<TradeRepository>();
+    var accountRepo = scope.ServiceProvider
+        .GetRequiredService<AccountRepository>();
+
+    var trades = batch.Select(m => new Trade
     {
-        using var scope = _scopeFactory.CreateScope();
-        var repo = scope.ServiceProvider
-            .GetRequiredService<TradeRepository>();
+        Id           = m.Id,
+        TradingPair  = m.TradingPair,
+        BuyOrderId   = m.BuyOrderId,
+        SellOrderId  = m.SellOrderId,
+        BuyerUserId  = m.BuyerUserId,
+        SellerUserId = m.SellerUserId,
+        Price        = m.Price,
+        Quantity     = m.Quantity,
+        ExecutedAt   = m.ExecutedAt
+    }).ToList();
 
-        var trades = batch.Select(m => new Trade
+    // Save trades to PostgreSQL
+    repo.SaveTradesBatchAsync(trades).GetAwaiter().GetResult();
+
+    // Transfer funds for each trade
+    foreach (var trade in trades)
+    {
+        try
         {
-            Id           = m.Id,
-            TradingPair  = m.TradingPair,
-            BuyOrderId   = m.BuyOrderId,
-            SellOrderId  = m.SellOrderId,
-            BuyerUserId  = m.BuyerUserId,
-            SellerUserId = m.SellerUserId,
-            Price        = m.Price,
-            Quantity     = m.Quantity,
-            ExecutedAt   = m.ExecutedAt
-        }).ToList();
+            accountRepo.TransferTradeAsync(
+                buyerUserId:  trade.BuyerUserId,
+                sellerUserId: trade.SellerUserId,
+                tradingPair:  trade.TradingPair,
+                quantity:     trade.Quantity,
+                price:        trade.Price,
+                tradeId:      trade.Id
+            ).GetAwaiter().GetResult();
 
-        repo.SaveTradesBatchAsync(trades).GetAwaiter().GetResult();
+            _logger.LogInformation(
+                "TRANSFER COMPLETE | {Pair} | " +
+                "Buyer: {Buyer} | Seller: {Seller} | " +
+                "Qty: {Qty} @ {Price}",
+                trade.TradingPair,
+                trade.BuyerUserId,
+                trade.SellerUserId,
+                trade.Quantity,
+                trade.Price);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Fund transfer failed for trade {TradeId} — " +
+                "trade saved but funds not transferred",
+                trade.Id);
+        }
     }
+}
+
+
 }

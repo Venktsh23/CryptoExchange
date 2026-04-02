@@ -8,6 +8,7 @@ using Exchange.Core.Persistence.Repositories;
 using Exchange.API.Hubs;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
+using Exchange.Core.Accounts;
 
 // Serilog setup
 Log.Logger = new LoggerConfiguration()
@@ -47,6 +48,8 @@ builder.Services.AddDbContext<ExchangeDbContext>(options =>
 
 builder.Services.AddScoped<TradeRepository>();
 builder.Services.AddScoped<SnapshotRepository>();
+builder.Services.AddScoped<AccountRepository>();
+builder.Services.AddScoped<AccountService>();
 
 // Kafka settings — read from appsettings.json
 var kafkaSettings = builder.Configuration
