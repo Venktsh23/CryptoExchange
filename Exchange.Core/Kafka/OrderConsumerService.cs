@@ -12,6 +12,7 @@ public class OrderConsumerService : BackgroundService
     private readonly KafkaSettings              _settings;
     private readonly MatchingEngine             _engine;
     private readonly SettlementChannel          _settlementChannel;
+    private readonly TradeProducer                 _tradeProducer; 
     private readonly ILogger<OrderConsumerService> _logger;
 
     private Func<Trade, Task>? _onTradeExecuted;
@@ -23,11 +24,13 @@ public class OrderConsumerService : BackgroundService
         KafkaSettings settings,
         MatchingEngine engine,
         SettlementChannel settlementChannel,
+            TradeProducer tradeProducer,  
         ILogger<OrderConsumerService> logger)
     {
         _settings          = settings;
         _engine            = engine;
         _settlementChannel = settlementChannel;
+        _tradeProducer     = tradeProducer;
         _logger            = logger;
     }
 
@@ -127,26 +130,38 @@ public class OrderConsumerService : BackgroundService
                     Interlocked.Add(ref _totalTrades, trades.Count);
 
                     // Handle each resulting trade
-                    foreach (var trade in trades)
-                    {
-                        _logger.LogInformation(
-                            "TRADE | {Pair} | {Qty}@{Price} | " +
-                            "Buyer: {Buyer} | Seller: {Seller}",
-                            trade.TradingPair, trade.Quantity,
-                            trade.Price, trade.BuyerUserId,
-                            trade.SellerUserId);
+                   // Handle each resulting trade
+foreach (var trade in trades)
+{
+    _logger.LogInformation(
+        "TRADE | {Pair} | {Qty}@{Price} | " +
+        "Buyer: {Buyer} | Seller: {Seller}",
+        trade.TradingPair, trade.Quantity,
+        trade.Price, trade.BuyerUserId,
+        trade.SellerUserId);
 
-                        // Broadcast to SignalR — fire and forget
-                        // Engine never waits for UI delivery
-                        if (_onTradeExecuted != null)
-                            _ = Task.Run(
-                                () => _onTradeExecuted(trade), ct);
+    // 1. Broadcast to SignalR — fire and forget
+    if (_onTradeExecuted != null)
+        _ = Task.Run(() => _onTradeExecuted(trade), ct);
 
-                        // Push to settlement channel
-                        // Settlement worker saves to PostgreSQL
-                        _settlementChannel.Writer
-                            .TryWrite(trade); // non-blocking
-                    }
+    // 2. Publish to Kafka trades topic — this is what
+    //    KafkaSettlementWorker reads from
+    _ = Task.Run(async () =>
+    {
+        try
+        {
+            await _tradeProducer.PublishTradeAsync(trade);
+            _logger.LogDebug(
+                "Trade published to Kafka | {TradeId}", trade.Id);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Failed to publish trade {TradeId} to Kafka",
+                trade.Id);
+        }
+    }, ct);
+}
 
                     // COMMIT only after successful processing
                     // If we crash here, Kafka replays this order on restart

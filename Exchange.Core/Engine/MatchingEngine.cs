@@ -72,16 +72,16 @@ public class MatchingEngine
 
             // Trade executes at the SELLER's price
             // (buyer said up to $60k, seller said $59.5k — buyer gets the better deal)
-            var trade = new Trade
-            {
-                TradingPair = buyOrder.TradingPair,
-                BuyOrderId = buyOrder.Id,
-                SellOrderId = sellOrder.Id,
-                BuyerUserId = buyOrder.UserId,
-                SellerUserId = sellOrder.UserId,
-                Price = bestAskPrice,       // Actual execution price
-                Quantity = fillQty
-            };
+          var trade = new Trade
+{
+    TradingPair  = buyOrder.TradingPair,
+    BuyOrderId   = buyOrder.Id,      // ← verify this is set
+    SellOrderId  = sellOrder.Id,     // ← verify this is set
+    BuyerUserId  = buyOrder.UserId,
+    SellerUserId = sellOrder.UserId,
+    Price        = bestAskPrice,
+    Quantity     = fillQty
+};
 
             trades.Add(trade);
 

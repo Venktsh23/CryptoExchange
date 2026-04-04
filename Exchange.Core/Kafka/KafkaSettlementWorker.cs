@@ -179,36 +179,32 @@ public class KafkaSettlementWorker : BackgroundService
 
     // Transfer funds for each trade
     foreach (var trade in trades)
+{
+    try
     {
-        try
-        {
-            accountRepo.TransferTradeAsync(
-                buyerUserId:  trade.BuyerUserId,
-                sellerUserId: trade.SellerUserId,
-                tradingPair:  trade.TradingPair,
-                quantity:     trade.Quantity,
-                price:        trade.Price,
-                tradeId:      trade.Id
-            ).GetAwaiter().GetResult();
+        accountRepo.TransferTradeAsync(
+    buyerUserId:  trade.BuyerUserId,
+    sellerUserId: trade.SellerUserId,
+    tradingPair:  trade.TradingPair,
+    quantity:     trade.Quantity,
+    price:        trade.Price,
+    tradeId:      trade.Id,
+    buyOrderId:   trade.BuyOrderId,
+    sellOrderId:  trade.SellOrderId
+).GetAwaiter().GetResult();
 
-            _logger.LogInformation(
-                "TRANSFER COMPLETE | {Pair} | " +
-                "Buyer: {Buyer} | Seller: {Seller} | " +
-                "Qty: {Qty} @ {Price}",
-                trade.TradingPair,
-                trade.BuyerUserId,
-                trade.SellerUserId,
-                trade.Quantity,
-                trade.Price);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex,
-                "Fund transfer failed for trade {TradeId} — " +
-                "trade saved but funds not transferred",
-                trade.Id);
-        }
+        _logger.LogInformation(
+            "TRANSFER COMPLETE | {Pair} | Buyer: {Buyer} | Seller: {Seller}",
+            trade.TradingPair, trade.BuyerUserId, trade.SellerUserId);
     }
+    catch (Exception ex)
+    {
+        // Make this visible — not silent
+        _logger.LogError(ex,
+            "TRANSFER FAILED | Trade: {TradeId} | Error: {Error}",
+            trade.Id, ex.Message);
+    }
+}
 }
 
 

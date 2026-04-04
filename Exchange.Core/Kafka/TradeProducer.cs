@@ -30,18 +30,18 @@ public class TradeProducer : IDisposable
     public async Task PublishTradeAsync(Trade trade)
     {
         var message = new TradeMessage
-        {
-            Id           = trade.Id,
-            TradingPair  = trade.TradingPair,
-            BuyOrderId   = trade.BuyOrderId,
-            SellOrderId  = trade.SellOrderId,
-            BuyerUserId  = trade.BuyerUserId,
-            SellerUserId = trade.SellerUserId,
-            Price        = trade.Price,
-            Quantity     = trade.Quantity,
-            TotalValue   = trade.TotalValue,
-            ExecutedAt   = trade.ExecutedAt
-        };
+{
+    Id           = trade.Id,
+    TradingPair  = trade.TradingPair,
+    BuyOrderId   = trade.BuyOrderId,   // ← must be set
+    SellOrderId  = trade.SellOrderId,  // ← must be set
+    BuyerUserId  = trade.BuyerUserId,
+    SellerUserId = trade.SellerUserId,
+    Price        = trade.Price,
+    Quantity     = trade.Quantity,
+    TotalValue   = trade.TotalValue,
+    ExecutedAt   = trade.ExecutedAt
+};
 
         try
         {

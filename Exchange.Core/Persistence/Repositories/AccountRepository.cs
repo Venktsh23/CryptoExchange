@@ -1,18 +1,26 @@
 using Microsoft.EntityFrameworkCore;
 using Exchange.Core.Accounts.Models;
 using Exchange.Core.Persistence.Entities;
+using Polly;
+using Microsoft.Extensions.Logging;
 
 namespace Exchange.Core.Persistence.Repositories;
 
 public class AccountRepository
 {
-    private readonly ExchangeDbContext _context;
+  private readonly ExchangeDbContext          _context;
+// private readonly ResiliencePipeline         _dbPipeline;
+private readonly ILogger<AccountRepository> _logger;
 
-    public AccountRepository(ExchangeDbContext context)
-    {
-        _context = context;
-    }
-
+  public AccountRepository(
+    ExchangeDbContext context,
+    ILogger<AccountRepository> logger)
+{
+    _context    = context;
+    _logger     = logger;
+    // _dbPipeline = PollyExtensions
+    //     .CreateDatabasePipeline(logger, "AccountDB");
+}
     // Get account — returns null if doesn't exist
     public async Task<AccountEntity?> GetAccountAsync(
         string userId, string currency)
@@ -179,119 +187,155 @@ public class AccountRepository
     // Buyer: USD deducted, crypto added
     // Seller: crypto deducted, USD added
     public async Task TransferTradeAsync(
-        string buyerUserId,
-        string sellerUserId,
-        string tradingPair,       // e.g. "BTC/USD"
-        decimal quantity,         // BTC amount
-        decimal price,            // USD per BTC
-        Guid tradeId)
+    string  buyerUserId,
+    string  sellerUserId,
+    string  tradingPair,
+    decimal quantity,
+    decimal price,
+    Guid    tradeId,
+    Guid    buyOrderId,    // ← find exact buyer lock
+    Guid    sellOrderId)   // ← find exact seller lock
+{
+    var parts     = tradingPair.Split('/');
+    var baseCcy   = parts[0]; // BTC
+    var quoteCcy  = parts[1]; // USD
+    var usdAmount = quantity * price;
+
+    // Load all accounts
+    var buyerUsd  = await GetOrCreateAccountAsync(buyerUserId,  quoteCcy);
+    var buyerBtc  = await GetOrCreateAccountAsync(buyerUserId,  baseCcy);
+    var sellerBtc = await GetOrCreateAccountAsync(sellerUserId, baseCcy);
+    var sellerUsd = await GetOrCreateAccountAsync(sellerUserId, quoteCcy);
+
+    // Find exact locks by OrderId — not by user+currency
+    var buyerLock = await _context.FundLocks
+        .FirstOrDefaultAsync(f =>
+            f.OrderId == buyOrderId &&
+            f.Status  == "Active");
+
+    var sellerLock = await _context.FundLocks
+        .FirstOrDefaultAsync(f =>
+            f.OrderId == sellOrderId &&
+            f.Status  == "Active");
+
+    // Update buyer balances
+    buyerUsd.TotalBalance  -= usdAmount;
+    buyerUsd.LockedBalance -= usdAmount;
+    buyerUsd.UpdatedAt     =  DateTime.UtcNow;
+
+    buyerBtc.TotalBalance += quantity;
+    buyerBtc.UpdatedAt    =  DateTime.UtcNow;
+
+    // Update seller balances
+    sellerBtc.TotalBalance  -= quantity;
+    sellerBtc.LockedBalance -= quantity;
+    sellerBtc.UpdatedAt     =  DateTime.UtcNow;
+
+    sellerUsd.TotalBalance += usdAmount;
+    sellerUsd.UpdatedAt    =  DateTime.UtcNow;
+
+    // Consume the locks
+    if (buyerLock != null)
     {
-        // Parse trading pair — "BTC/USD" → base="BTC", quote="USD"
-        var parts     = tradingPair.Split('/');
-        var baseCcy   = parts[0]; // BTC
-        var quoteCcy  = parts[1]; // USD
-        var usdAmount = quantity * price;
-
-        // Buyer: loses USD, gains BTC
-        var buyerUsd = await GetAccountAsync(buyerUserId, quoteCcy);
-        var buyerBtc = await GetAccountAsync(buyerUserId, baseCcy)
-                    ?? new AccountEntity
-                       {
-                           Id        = Guid.NewGuid(),
-                           UserId    = buyerUserId,
-                           Currency  = baseCcy,
-                           CreatedAt = DateTime.UtcNow
-                       };
-
-        // Seller: loses BTC, gains USD
-        var sellerBtc = await GetAccountAsync(sellerUserId, baseCcy);
-        var sellerUsd = await GetAccountAsync(sellerUserId, quoteCcy)
-                     ?? new AccountEntity
-                        {
-                            Id        = Guid.NewGuid(),
-                            UserId    = sellerUserId,
-                            Currency  = quoteCcy,
-                            CreatedAt = DateTime.UtcNow
-                        };
-
-        if (buyerUsd != null)
-        {
-            buyerUsd.TotalBalance  -= usdAmount;
-            buyerUsd.LockedBalance -= usdAmount; // Consume the lock
-            buyerUsd.UpdatedAt     =  DateTime.UtcNow;
-        }
-
-        buyerBtc.TotalBalance += quantity;
-        buyerBtc.UpdatedAt    =  DateTime.UtcNow;
-
-        if (sellerBtc != null)
-        {
-            sellerBtc.TotalBalance  -= quantity;
-            sellerBtc.LockedBalance -= quantity; // Consume the lock
-            sellerBtc.UpdatedAt     =  DateTime.UtcNow;
-        }
-
-        sellerUsd.TotalBalance += usdAmount;
-        sellerUsd.UpdatedAt    =  DateTime.UtcNow;
-
-        // Add new accounts if created
-        if (buyerBtc.Id == Guid.Empty ||
-            !await _context.Accounts.AnyAsync(a => a.Id == buyerBtc.Id))
-            _context.Accounts.Add(buyerBtc);
-
-        if (!await _context.Accounts.AnyAsync(a => a.Id == sellerUsd.Id))
-            _context.Accounts.Add(sellerUsd);
-
-        // Record all four transaction legs
-        var transactions = new[]
-        {
-            new AccountTransactionEntity
-            {
-                Id          = Guid.NewGuid(),
-                UserId      = buyerUserId,
-                Currency    = quoteCcy,
-                Amount      = -usdAmount,
-                Type        = TransactionType.TradeBuy.ToString(),
-                ReferenceId = tradeId,
-                Description = $"Buy {quantity} {baseCcy} @ {price} {quoteCcy}",
-                CreatedAt   = DateTime.UtcNow
-            },
-            new AccountTransactionEntity
-            {
-                Id          = Guid.NewGuid(),
-                UserId      = buyerUserId,
-                Currency    = baseCcy,
-                Amount      = quantity,
-                Type        = TransactionType.TradeBuy.ToString(),
-                ReferenceId = tradeId,
-                Description = $"Received {quantity} {baseCcy} from trade",
-                CreatedAt   = DateTime.UtcNow
-            },
-            new AccountTransactionEntity
-            {
-                Id          = Guid.NewGuid(),
-                UserId      = sellerUserId,
-                Currency    = baseCcy,
-                Amount      = -quantity,
-                Type        = TransactionType.TradeSell.ToString(),
-                ReferenceId = tradeId,
-                Description = $"Sell {quantity} {baseCcy} @ {price} {quoteCcy}",
-                CreatedAt   = DateTime.UtcNow
-            },
-            new AccountTransactionEntity
-            {
-                Id          = Guid.NewGuid(),
-                UserId      = sellerUserId,
-                Currency    = quoteCcy,
-                Amount      = usdAmount,
-                Type        = TransactionType.TradeSell.ToString(),
-                ReferenceId = tradeId,
-                Description = $"Received {usdAmount} {quoteCcy} from trade",
-                CreatedAt   = DateTime.UtcNow
-            }
-        };
-
-        _context.AccountTransactions.AddRange(transactions);
-        await _context.SaveChangesAsync();
+        buyerLock.Status     = "Consumed";
+        buyerLock.ReleasedAt = DateTime.UtcNow;
     }
+    else
+    {
+        _logger.LogWarning(
+            "Buyer lock not found for order {OrderId}", buyOrderId);
+    }
+
+    if (sellerLock != null)
+    {
+        sellerLock.Status     = "Consumed";
+        sellerLock.ReleasedAt = DateTime.UtcNow;
+    }
+    else
+    {
+        _logger.LogWarning(
+            "Seller lock not found for order {OrderId}", sellOrderId);
+    }
+
+    // Record transactions
+    _context.AccountTransactions.AddRange(new[]
+    {
+        new AccountTransactionEntity
+        {
+            Id          = Guid.NewGuid(),
+            UserId      = buyerUserId,
+            Currency    = quoteCcy,
+            Amount      = -usdAmount,
+            Type        = TransactionType.TradeBuy.ToString(),
+            ReferenceId = tradeId,
+            Description = $"Buy {quantity} {baseCcy} @ {price}",
+            CreatedAt   = DateTime.UtcNow
+        },
+        new AccountTransactionEntity
+        {
+            Id          = Guid.NewGuid(),
+            UserId      = buyerUserId,
+            Currency    = baseCcy,
+            Amount      = quantity,
+            Type        = TransactionType.TradeBuy.ToString(),
+            ReferenceId = tradeId,
+            Description = $"Received {quantity} {baseCcy}",
+            CreatedAt   = DateTime.UtcNow
+        },
+        new AccountTransactionEntity
+        {
+            Id          = Guid.NewGuid(),
+            UserId      = sellerUserId,
+            Currency    = baseCcy,
+            Amount      = -quantity,
+            Type        = TransactionType.TradeSell.ToString(),
+            ReferenceId = tradeId,
+            Description = $"Sold {quantity} {baseCcy} @ {price}",
+            CreatedAt   = DateTime.UtcNow
+        },
+        new AccountTransactionEntity
+        {
+            Id          = Guid.NewGuid(),
+            UserId      = sellerUserId,
+            Currency    = quoteCcy,
+            Amount      = usdAmount,
+            Type        = TransactionType.TradeSell.ToString(),
+            ReferenceId = tradeId,
+            Description = $"Received {usdAmount} {quoteCcy}",
+            CreatedAt   = DateTime.UtcNow
+        }
+    });
+
+    await _context.SaveChangesAsync();
+}
+
+// Helper — gets existing account or creates a zero-balance one
+private async Task<AccountEntity> GetOrCreateAccountAsync(
+    string userId, string currency)
+{
+    var account = await _context.Accounts
+        .FirstOrDefaultAsync(a =>
+            a.UserId   == userId &&
+            a.Currency == currency);
+
+    if (account != null) return account;
+
+    // Create new zero-balance account
+    account = new AccountEntity
+    {
+        Id            = Guid.NewGuid(),
+        UserId        = userId,
+        Currency      = currency,
+        TotalBalance  = 0,
+        LockedBalance = 0,
+        CreatedAt     = DateTime.UtcNow,
+        UpdatedAt     = DateTime.UtcNow
+    };
+
+    _context.Accounts.Add(account);
+    return account;
+}
+
+
+
 }
