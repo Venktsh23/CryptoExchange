@@ -83,8 +83,7 @@ public class KafkaSettlementWorker : BackgroundService
             "Settlement subscribed to topic: {Topic}", _settings.TradesTopic);
 
         var batch      = new List<TradeMessage>();
-        var lastOffset = (TopicPartitionOffset?)null;
-
+        var lastResult = (ConsumeResult<string, string>?)null;
         try
         {
             while (!ct.IsCancellationRequested)
@@ -101,8 +100,7 @@ public class KafkaSettlementWorker : BackgroundService
                         if (msg != null)
                         {
                             batch.Add(msg);
-                            lastOffset = result.TopicPartitionOffset;
-                        }
+                        lastResult = result;                        }
                     }
 
                     // Save when batch is full OR poll returned nothing
@@ -114,20 +112,21 @@ public class KafkaSettlementWorker : BackgroundService
                         _retryPipeline.Execute(() => SaveBatch(batch));
 
                         // Commit ONLY after successful DB save
-                        if (lastOffset != null)
+                       if (lastResult != null)
                         {
-                            consumer.Commit(new[] { lastOffset });
+                     consumer.Commit(lastResult); // ← stores offset+1 automatically
                             _logger.LogInformation(
-                                "SETTLEMENT | Batch #{N} | " +
-                                "Saved {Count} trades | " +
-                                "Offset: {Offset}",
-                                ++_totalBatches, batch.Count,
-                                lastOffset.Offset.Value);
-                        }
+                            "SETTLEMENT | Batch #{N} | Saved {Count} trades | " +
+                            "Offset committed: {Offset} (next read: {Next})",
+                            ++_totalBatches, batch.Count,
+                            lastResult.Offset.Value,
+                            lastResult.Offset.Value + 1);
+                        lastResult = null;
+                    }
 
                         _totalSaved += batch.Count;
                         batch.Clear();
-                        lastOffset = null;
+                        lastResult = null;
                     }
                 }
                 catch (ConsumeException ex)
@@ -137,16 +136,14 @@ public class KafkaSettlementWorker : BackgroundService
                 }
             }
         }
-        finally
+       finally
         {
-            // Save remaining on shutdown
             if (batch.Count > 0)
             {
                 SaveBatch(batch);
-                if (lastOffset != null)
-                    consumer.Commit(new[] { lastOffset });
+                if (lastResult != null)
+                    consumer.Commit(lastResult);
             }
-
             consumer.Close();
             _logger.LogInformation(
                 "Settlement stopped. Total saved: {Total}", _totalSaved);

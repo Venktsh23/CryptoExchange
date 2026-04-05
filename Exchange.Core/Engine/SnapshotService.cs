@@ -34,8 +34,9 @@ public class SnapshotService : BackgroundService
             "Snapshot Service started. Saving order book every {Minutes} minutes.",
             _interval.TotalMinutes
         );
-
-        // Wait for first interval before first snapshot
+        try
+        {
+            // Wait for first interval before first snapshot
         await Task.Delay(_interval, stoppingToken);
 
         while (!stoppingToken.IsCancellationRequested)
@@ -51,6 +52,26 @@ public class SnapshotService : BackgroundService
 
             await Task.Delay(_interval, stoppingToken);
         }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to initialize snapshot service.");
+        }
+        finally
+        {
+            _logger.LogInformation("Snapshot Service is stopping.");
+            try
+            {
+                await TakeSnapshotsAsync(CancellationToken.None);
+                _logger.LogInformation("Final snapshot taken during shutdown.");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Final snapshot failed during shutdown.");
+            }
+        }
+
+        
     }
 
     private async Task TakeSnapshotsAsync(CancellationToken ct)
@@ -107,34 +128,42 @@ public class SnapshotService : BackgroundService
     }
 
     // Converts the order book into a serializable structure
-    private static object SerializeOrderBook(OrderBook book)
+  private static object SerializeOrderBook(OrderBook book)
     {
         return new
         {
             tradingPair = book.TradingPair,
             bids = book.Bids.ToDictionary(
                 kvp => kvp.Key.ToString(),
-                kvp => kvp.Value.Select(o => new
-                {
-                    o.Id, o.UserId, o.TradingPair,
-                    Side     = o.Side.ToString(),
-                    o.Price, o.Quantity,
-                    o.FilledQuantity,
-                    Status   = o.Status.ToString(),
-                    o.CreatedAt
-                }).ToList()
+                kvp => kvp.Value
+                    .Where(o => o.RemainingQuantity > 0 &&
+                                o.Status != OrderStatus.Filled &&
+                                o.Status != OrderStatus.Cancelled)
+                    .Select(o => new
+                    {
+                        o.Id, o.UserId, o.TradingPair,
+                        Side          = o.Side.ToString(),
+                        o.Price, o.Quantity,
+                        o.FilledQuantity,
+                        Status        = o.Status.ToString(),
+                        o.CreatedAt
+                    }).ToList()
             ),
             asks = book.Asks.ToDictionary(
                 kvp => kvp.Key.ToString(),
-                kvp => kvp.Value.Select(o => new
-                {
-                    o.Id, o.UserId, o.TradingPair,
-                    Side     = o.Side.ToString(),
-                    o.Price, o.Quantity,
-                    o.FilledQuantity,
-                    Status   = o.Status.ToString(),
-                    o.CreatedAt
-                }).ToList()
+                kvp => kvp.Value
+                    .Where(o => o.RemainingQuantity > 0 &&
+                                o.Status != OrderStatus.Filled &&
+                                o.Status != OrderStatus.Cancelled)
+                    .Select(o => new
+                    {
+                        o.Id, o.UserId, o.TradingPair,
+                        Side          = o.Side.ToString(),
+                        o.Price, o.Quantity,
+                        o.FilledQuantity,
+                        Status        = o.Status.ToString(),
+                        o.CreatedAt
+                    }).ToList()
             )
         };
     }
