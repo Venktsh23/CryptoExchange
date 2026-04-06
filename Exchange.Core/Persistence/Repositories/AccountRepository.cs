@@ -84,68 +84,65 @@ private readonly ILogger<AccountRepository> _logger;
 
     // Lock funds for a pending order
     // Returns false if insufficient available balance
-    public async Task<bool> TryLockFundsAsync(
-        Guid orderId, string userId, string currency, decimal amount)
+   public async Task<bool> TryLockFundsAsync(
+    Guid    orderId,
+    string  userId,
+    string  currency,
+    decimal amount,
+    OutboxMessageEntity? outboxMessage = null)  // ← add this parameter
+{
+    for (int attempt = 0; attempt < 3; attempt++)
     {
-        // Retry loop for optimistic concurrency conflicts
-        // If two requests hit simultaneously, one retries
-        for (int attempt = 0; attempt < 3; attempt++)
+        try
         {
-            try
+            var account = await GetAccountAsync(userId, currency);
+            if (account == null) return false;
+
+            var available = account.TotalBalance - account.LockedBalance;
+            if (available < amount) return false;
+
+            account.LockedBalance += amount;
+            account.UpdatedAt     =  DateTime.UtcNow;
+
+            _context.FundLocks.Add(new FundLockEntity
             {
-                var account = await GetAccountAsync(userId, currency);
+                Id        = Guid.NewGuid(),
+                OrderId   = orderId,
+                UserId    = userId,
+                Currency  = currency,
+                Amount    = amount,
+                Status    = "Active",
+                CreatedAt = DateTime.UtcNow
+            });
 
-                if (account == null)
-                    return false; // No account
-
-                var available = account.TotalBalance - account.LockedBalance;
-
-                if (available < amount)
-                    return false; // Insufficient funds
-
-                // Lock the funds
-                account.LockedBalance += amount;
-                account.UpdatedAt     =  DateTime.UtcNow;
-
-                // Create the lock record
-                _context.FundLocks.Add(new FundLockEntity
-                {
-                    Id        = Guid.NewGuid(),
-                    OrderId   = orderId,
-                    UserId    = userId,
-                    Currency  = currency,
-                    Amount    = amount,
-                    Status    = "Active",
-                    CreatedAt = DateTime.UtcNow
-                });
-
-                // Record transaction
-                _context.AccountTransactions.Add(new AccountTransactionEntity
-                {
-                    Id          = Guid.NewGuid(),
-                    UserId      = userId,
-                    Currency    = currency,
-                    Amount      = -amount, // Negative = funds locked
-                    Type        = TransactionType.LockFunds.ToString(),
-                    ReferenceId = orderId,
-                    Description = $"Lock {amount} {currency} for order {orderId}",
-                    CreatedAt   = DateTime.UtcNow
-                });
-
-                await _context.SaveChangesAsync();
-                return true;
-            }
-            catch (DbUpdateConcurrencyException)
+            _context.AccountTransactions.Add(new AccountTransactionEntity
             {
-                // Another request updated this account simultaneously
-                // Reload and retry
-                if (attempt == 2) throw;
-                await Task.Delay(50 * (attempt + 1));
-            }
+                Id          = Guid.NewGuid(),
+                UserId      = userId,
+                Currency    = currency,
+                Amount      = -amount,
+                Type        = TransactionType.LockFunds.ToString(),
+                ReferenceId = orderId,
+                Description = $"Lock {amount} {currency} for order {orderId}",
+                CreatedAt   = DateTime.UtcNow
+            });
+
+            // THE KEY LINE — same SaveChangesAsync, same transaction
+            if (outboxMessage != null)
+                _context.OutboxMessages.Add(outboxMessage);
+
+            await _context.SaveChangesAsync();
+            return true;
         }
-
-        return false;
+        catch (DbUpdateConcurrencyException)
+        {
+            if (attempt == 2) throw;
+            await Task.Delay(50 * (attempt + 1));
+        }
     }
+
+    return false;
+}
 
     // Release locked funds — order cancelled
     public async Task ReleaseFundsAsync(Guid orderId)

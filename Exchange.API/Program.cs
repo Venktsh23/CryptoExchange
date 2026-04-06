@@ -74,6 +74,7 @@ builder.Services.AddHostedService(sp =>
 builder.Services.AddHostedService<KafkaSettlementWorker>();
 builder.Services.AddHostedService<SnapshotService>();
 builder.Services.AddHostedService<OrderBookRestoreService>();
+builder.Services.AddHostedService<OutboxPublisherService>();
 
 var app = builder.Build();
 
