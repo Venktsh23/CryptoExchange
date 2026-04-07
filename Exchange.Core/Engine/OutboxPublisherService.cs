@@ -5,6 +5,8 @@ using Microsoft.EntityFrameworkCore;
 using Confluent.Kafka;
 using Exchange.Core.Persistence;
 using Exchange.Core.Kafka;
+using Exchange.Core.Persistence.Entities;
+using Exchange.Core.Persistence.Repositories;
 
 namespace Exchange.Core.Engine;
 
@@ -16,6 +18,7 @@ public class OutboxPublisherService : BackgroundService
 
     private readonly TimeSpan _pollInterval = TimeSpan.FromMilliseconds(500);
     private const int BatchSize = 50;
+    private const int MaxRetryCount = 5;
     private long _totalPublished = 0;
 
     public OutboxPublisherService(
@@ -26,7 +29,6 @@ public class OutboxPublisherService : BackgroundService
         _scopeFactory  = scopeFactory;
         _logger        = logger;
         _kafkaSettings = kafkaSettings;
-        // Nothing that can throw — constructor is now safe
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -48,66 +50,100 @@ public class OutboxPublisherService : BackgroundService
         }
     }
 
-    private async Task PublishPendingMessagesAsync(CancellationToken ct)
+   private async Task PublishPendingMessagesAsync(CancellationToken ct)
+{
+    using var scope = _scopeFactory.CreateScope();
+    var db = scope.ServiceProvider.GetRequiredService<ExchangeDbContext>();
+
+    var pending = await db.OutboxMessages
+        .Where(m => m.PublishedAt == null && m.RetryCount < MaxRetryCount)
+        .OrderBy(m => m.CreatedAt)
+        .Take(BatchSize)
+        .ToListAsync(ct);
+
+    if (!pending.Any()) return;
+
+    _logger.LogInformation(
+        "Outbox: found {Count} unpublished messages — attempting publish",
+        pending.Count);
+
+    using var producer = new ProducerBuilder<string, string>(new ProducerConfig
     {
-        using var scope = _scopeFactory.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<ExchangeDbContext>();
+        BootstrapServers      = _kafkaSettings.BootstrapServers,
+        Acks                  = Acks.All,
+        EnableIdempotence     = true,
+        MessageSendMaxRetries = MaxRetryCount,
+        MessageTimeoutMs      = 5000
+    }).Build();
 
-        var pending = await db.OutboxMessages
-            .Where(m => m.PublishedAt == null && m.RetryCount < 5)
-            .OrderBy(m => m.CreatedAt)
-            .Take(BatchSize)
-            .ToListAsync(ct);
-
-        if (!pending.Any()) return;
-
-        _logger.LogInformation(
-            "Outbox: found {Count} unpublished messages — attempting publish",
-            pending.Count);
-
-        // Fresh producer per cycle — survives Kafka restarts cleanly
-        using var producer = new ProducerBuilder<string, string>(new ProducerConfig
+    foreach (var message in pending)
+    {
+        try
         {
-            BootstrapServers      = _kafkaSettings.BootstrapServers,
-            Acks                  = Acks.All,
-            EnableIdempotence     = true,
-            MessageSendMaxRetries = 5,
-            // Don't wait forever if Kafka is still down
-            MessageTimeoutMs      = 5000
-        }).Build();
+            await producer.ProduceAsync(
+                message.Topic,
+                new Message<string, string>
+                {
+                    Key   = message.MessageKey,
+                    Value = message.Payload
+                },
+                ct);
 
-        foreach (var message in pending)
+            message.PublishedAt = DateTime.UtcNow;
+            _totalPublished++;
+
+            _logger.LogInformation(
+                "Outbox published | OrderId: {Key} | Type: {Type}",
+                message.MessageKey, message.MessageType);
+        }
+        catch (Exception ex)
         {
-            try
+            message.RetryCount++;
+            message.LastError = ex.Message;
+
+            _logger.LogWarning(
+                "Outbox publish failed (attempt {Attempt}/{Max}) | Error: {Error}",
+                message.RetryCount, MaxRetryCount, ex.Message);
+
+            // This message has now hit the limit — release funds
+            if (message.RetryCount >= MaxRetryCount)
             {
-                await producer.ProduceAsync(
-                    message.Topic,
-                    new Message<string, string>
-                    {
-                        Key   = message.MessageKey,
-                        Value = message.Payload
-                    },
-                    ct);
-
-                message.PublishedAt = DateTime.UtcNow;
-                _totalPublished++;
-
-                _logger.LogInformation(
-                    "Outbox published | OrderId: {Key} | Type: {Type}",
-                    message.MessageKey, message.MessageType);
-            }
-            catch (Exception ex)
-            {
-                message.RetryCount++;
-                message.LastError = ex.Message;
-
-                _logger.LogWarning(
-                    "Outbox publish failed (attempt {Attempt}/5) | Error: {Error}",
-                    message.RetryCount, ex.Message);
+                _logger.LogError(
+                    "Outbox message {Id} exceeded max retries — releasing fund lock",
+                    message.Id);
+                await ReleaseFundsForDeadMessagesAsync(message, scope);
             }
         }
+    }
 
-        producer.Flush(TimeSpan.FromSeconds(5));
-        await db.SaveChangesAsync(ct);
+    producer.Flush(TimeSpan.FromSeconds(5));
+    await db.SaveChangesAsync(ct);
+}
+
+
+    private async Task ReleaseFundsForDeadMessagesAsync(OutboxMessageEntity message,IServiceScope scope)
+    {
+        try
+        {
+            var orderMsg = System.Text.Json.JsonSerializer.Deserialize<OrderMessage>(
+                message.Payload);
+            if (orderMsg == null)            {
+                _logger.LogError(
+                    "Failed to deserialize OrderMessage for OutboxMessageId: {Id}",
+                    message.Id);
+                return;
+            }
+
+            var orderRepo = scope.ServiceProvider.GetRequiredService<AccountRepository>();
+            await orderRepo.ReleaseFundsAsync(orderMsg.Id);
+             _logger.LogInformation(
+                    "Released funds lock for OrderId: {OrderId} after exceeding retry attempts",
+                    orderMsg.Id);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error releasing funds lock for OrderId: {OrderId}", message.MessageKey);          
+        }
+       
     }
 }
