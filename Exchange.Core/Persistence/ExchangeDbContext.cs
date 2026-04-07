@@ -14,8 +14,18 @@ public class ExchangeDbContext : DbContext
     public DbSet<FundLockEntity>           FundLocks           => Set<FundLockEntity>();
     public DbSet<AccountTransactionEntity> AccountTransactions => Set<AccountTransactionEntity>();
 
+    public DbSet<OutboxMessageEntity> OutboxMessages => Set<OutboxMessageEntity>();
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
+        modelBuilder.Entity<OutboxMessageEntity>(entity =>
+        {
+            entity.HasKey(o => o.Id);
+            entity.HasIndex(o => o.PublishedAt);  // fast query for unpublished
+            entity.HasIndex(o => o.CreatedAt);    // ordering
+            entity.Property(o => o.Payload).HasColumnType("text");
+        });
+
+        
         // Existing trade config
         modelBuilder.Entity<TradeEntity>(entity =>
         {

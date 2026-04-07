@@ -14,28 +14,29 @@ public class OrdersController : ControllerBase
     private readonly MatchingEngine  _engine;
     private readonly AccountService  _accountService;
 
+    private readonly KafkaSettings   _kafkaSettings;
+
+
     public OrdersController(
         OrderProducer  orderProducer,
         MatchingEngine engine,
-        AccountService accountService)
+        AccountService accountService,
+        KafkaSettings kafkaSettings)
     {
         _orderProducer  = orderProducer;
         _engine         = engine;
         _accountService = accountService;
+        _kafkaSettings  = kafkaSettings;
     }
 
     [HttpPost]
-    public async Task<IActionResult> PlaceOrder(
-        [FromBody] PlaceOrderRequest request)
+    public async Task<IActionResult> PlaceOrder([FromBody] PlaceOrderRequest request)
     {
         if (request.Price <= 0 || request.Quantity <= 0)
             return BadRequest("Price and quantity must be greater than zero.");
 
-        if (string.IsNullOrWhiteSpace(request.TradingPair))
-            return BadRequest("Trading pair required. e.g. BTC/USD");
-
-        if (!request.TradingPair.Contains('/'))
-            return BadRequest("Invalid trading pair format. Use BASE/QUOTE e.g. BTC/USD");
+        if (string.IsNullOrWhiteSpace(request.TradingPair) || !request.TradingPair.Contains('/'))
+            return BadRequest("Invalid format. Use BASE/QUOTE e.g. BTC/USD");
 
         var order = new Order
         {
@@ -46,26 +47,36 @@ public class OrdersController : ControllerBase
             Quantity    = request.Quantity
         };
 
-        // Validate balance and lock funds before accepting order
+        var orderMessage = new OrderMessage
+        {
+            Id          = order.Id,
+            UserId      = order.UserId,
+            TradingPair = order.TradingPair,
+            Side        = order.Side.ToString(),
+            Price       = order.Price,
+            Quantity    = order.Quantity,
+            CreatedAt   = order.CreatedAt
+        };
+
+        var orderPayload = System.Text.Json.JsonSerializer.Serialize(orderMessage);
+
         var validationError = await _accountService.ValidateAndLockAsync(
-            orderId:     order.Id,
-            userId:      order.UserId,
-            tradingPair: order.TradingPair,
-            side:        order.Side.ToString(),
-            price:       order.Price,
-            quantity:    order.Quantity
-        );
+            orderId:      order.Id,
+            userId:       order.UserId,
+            tradingPair:  order.TradingPair,
+            side:         order.Side.ToString(),
+            price:        order.Price,
+            quantity:     order.Quantity,
+            orderPayload: orderPayload,
+            kafkaTopic:   _kafkaSettings.OrdersTopic);
 
         if (validationError != null)
             return BadRequest(new { error = validationError });
 
-        // Funds locked — now safe to publish to Kafka
-        await _orderProducer.PublishOrderAsync(order);
-
         return Accepted(new
         {
             orderId     = order.Id,
-            message     = "Order accepted. Funds locked. Queued for matching.",
+            message     = "Order accepted. Funds locked. Publishing to exchange.",
             tradingPair = order.TradingPair,
             side        = order.Side.ToString(),
             price       = order.Price,
