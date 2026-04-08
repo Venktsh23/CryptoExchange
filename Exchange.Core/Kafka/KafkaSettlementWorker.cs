@@ -7,6 +7,7 @@ using Polly;
 using Polly.Retry;
 using Exchange.Core.Models;
 using Exchange.Core.Persistence.Repositories;
+using Exchange.Core.Resilience;
 
 namespace Exchange.Core.Kafka;
 
@@ -15,7 +16,7 @@ public class KafkaSettlementWorker : BackgroundService
     private readonly KafkaSettings                    _settings;
     private readonly IServiceScopeFactory             _scopeFactory;
     private readonly ILogger<KafkaSettlementWorker>   _logger;
-    private readonly ResiliencePipeline               _retryPipeline;
+    private readonly ResiliencePipeline               _pipeline;
 
     private long _totalSaved   = 0;
     private long _totalBatches = 0;
@@ -28,28 +29,8 @@ public class KafkaSettlementWorker : BackgroundService
         _settings     = settings;
         _scopeFactory = scopeFactory;
         _logger       = logger;
-
-        _retryPipeline = new ResiliencePipelineBuilder()
-            .AddRetry(new RetryStrategyOptions
-            {
-                ShouldHandle     = new PredicateBuilder().Handle<Exception>(),
-                MaxRetryAttempts = 5,
-                DelayGenerator   = static args =>
-                    ValueTask.FromResult<TimeSpan?>(
-                        TimeSpan.FromSeconds(
-                            Math.Pow(2, args.AttemptNumber + 1))),
-                OnRetry = args =>
-                {
-                    logger.LogWarning(
-                        "DB save failed (attempt {Attempt}). " +
-                        "Retrying in {Delay}s. Error: {Error}",
-                        args.AttemptNumber + 1,
-                        Math.Pow(2, args.AttemptNumber + 1),
-                        args.Outcome.Exception?.Message);
-                    return ValueTask.CompletedTask;
-                }
-            })
-            .Build();
+        _pipeline = ResiliencePipelineFactory
+        .CreateDatabasePipeline(logger, "SettlementDB");
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -109,8 +90,7 @@ public class KafkaSettlementWorker : BackgroundService
 
                     if (shouldSave && batch.Count > 0)
                     {
-                        _retryPipeline.Execute(() => SaveBatch(batch));
-
+                    _pipeline.Execute(() => SaveBatch(batch));              
                         // Commit ONLY after successful DB save
                        if (lastResult != null)
                         {

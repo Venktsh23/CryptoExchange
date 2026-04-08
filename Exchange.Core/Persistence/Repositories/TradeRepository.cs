@@ -1,22 +1,31 @@
 using Microsoft.EntityFrameworkCore;
 using Exchange.Core.Models;
 using Exchange.Core.Persistence.Entities;
-using Confluent.Kafka.Admin;
+using Exchange.Core.Resilience;
+using Polly;
+using Microsoft.Extensions.Logging;
 
 namespace Exchange.Core.Persistence.Repositories;
 
 public class TradeRepository
 {
-    private readonly ExchangeDbContext _context;
+    private readonly ExchangeDbContext  _context;
+    private readonly ResiliencePipeline _dbPipeline;
+    private readonly ILogger<TradeRepository> _logger;
 
-    public TradeRepository(ExchangeDbContext context)
+    public TradeRepository(
+        ExchangeDbContext context,
+        ILogger<TradeRepository> logger)
     {
-        _context = context;
+        _context    = context;
+        _logger     = logger;
+        _dbPipeline = ResiliencePipelineFactory
+            .CreateDatabasePipeline(logger, "TradeDB");
     }
 
     public async Task SaveTradeAsync(Trade trade)
     {
-        var entity = new TradeEntity
+        _context.Trades.Add(new TradeEntity
         {
             Id           = trade.Id,
             TradingPair  = trade.TradingPair,
@@ -29,16 +38,14 @@ public class TradeRepository
             TotalValue   = trade.TotalValue,
             ExecutedAt   = trade.ExecutedAt,
             PersistedAt  = DateTime.UtcNow
-        };
+        });
 
-        _context.Trades.Add(entity);
-        await _context.SaveChangesAsync();
+        await _dbPipeline.ExecuteAsync(async ct =>
+            await _context.SaveChangesAsync(ct));
     }
 
     public async Task SaveTradesBatchAsync(IEnumerable<Trade> trades)
     {
-        // Batch insert — more efficient than one-by-one
-        // The worker accumulates trades and saves in batches
         var entities = trades.Select(trade => new TradeEntity
         {
             Id           = trade.Id,
@@ -55,32 +62,27 @@ public class TradeRepository
         });
 
         _context.Trades.AddRange(entities);
-        await _context.SaveChangesAsync();
+
+        await _dbPipeline.ExecuteAsync(async ct =>
+            await _context.SaveChangesAsync(ct));
     }
 
-    // Get total filled quantity for a set of order IDs
-   public async Task<Dictionary<Guid, decimal>> GetFilledQuantitiesAsync(
-    HashSet<Guid> orderIds)
+    public async Task<Dictionary<Guid, decimal>> GetFilledQuantitiesAsync(
+        HashSet<Guid> orderIds)
     {
-        var trades = await _context.Trades
-            .Where(t => orderIds.Contains(t.BuyOrderId) ||
-                        orderIds.Contains(t.SellOrderId))
-            .Select(t => new
-            {
-                t.BuyOrderId,
-                t.SellOrderId,
-                t.Quantity
-            })
-            .ToListAsync();
+        var trades = await _dbPipeline.ExecuteAsync(async ct =>
+            await _context.Trades
+                .Where(t => orderIds.Contains(t.BuyOrderId) ||
+                            orderIds.Contains(t.SellOrderId))
+                .Select(t => new { t.BuyOrderId, t.SellOrderId, t.Quantity })
+                .ToListAsync(ct));
 
         var result = new Dictionary<Guid, decimal>();
-
         foreach (var trade in trades)
         {
             if (orderIds.Contains(trade.BuyOrderId))
                 result[trade.BuyOrderId] =
                     result.GetValueOrDefault(trade.BuyOrderId) + trade.Quantity;
-
             if (orderIds.Contains(trade.SellOrderId))
                 result[trade.SellOrderId] =
                     result.GetValueOrDefault(trade.SellOrderId) + trade.Quantity;
@@ -88,15 +90,15 @@ public class TradeRepository
 
         return result;
     }
-   
 
     public async Task<List<TradeEntity>> GetRecentTradesAsync(
         string tradingPair, int count = 50)
     {
-        return await _context.Trades
-            .Where(t => t.TradingPair == tradingPair)
-            .OrderByDescending(t => t.ExecutedAt)
-            .Take(count)
-            .ToListAsync();
+        return await _dbPipeline.ExecuteAsync(async ct =>
+            await _context.Trades
+                .Where(t => t.TradingPair == tradingPair)
+                .OrderByDescending(t => t.ExecutedAt)
+                .Take(count)
+                .ToListAsync(ct));
     }
 }
