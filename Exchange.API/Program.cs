@@ -9,6 +9,8 @@ using Exchange.API.Hubs;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using Exchange.Core.Accounts;
+using StackExchange.Redis;
+using Exchange.Core.RateLimit;
 
 // Serilog setup
 Log.Logger = new LoggerConfiguration()
@@ -55,6 +57,21 @@ builder.Services.AddScoped<AccountService>();
 var kafkaSettings = builder.Configuration
     .GetSection("Kafka")
     .Get<KafkaSettings>() ?? new KafkaSettings();
+
+builder.Services.AddSingleton<IConnectionMultiplexer>(
+    ConnectionMultiplexer.Connect(
+        builder.Configuration.GetConnectionString("Redis")!));
+
+
+// Rate limit settings
+var rateLimitSettings = builder.Configuration
+    .GetSection("RateLimit")
+    .Get<RateLimitSettings>() ?? new RateLimitSettings();
+
+builder.Services.AddSingleton(rateLimitSettings);
+builder.Services.AddSingleton<RedisRateLimiter>();
+
+
 
 builder.Services.AddSingleton(kafkaSettings);
 
