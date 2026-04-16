@@ -10,6 +10,7 @@ COPY CryptoExchange.slnx .
 COPY Exchange.API/Exchange.API.csproj           Exchange.API/
 COPY Exchange.Core/Exchange.Core.csproj         Exchange.Core/
 COPY Exchange.TestRunner/Exchange.TestRunner.csproj Exchange.TestRunner/
+COPY Exchange.Tests/Exchange.Tests.csproj       Exchange.Tests/   
 
 # Restore dependencies
 RUN dotnet restore
@@ -19,6 +20,8 @@ COPY Client/ Exchange.API/wwwroot/
 COPY Exchange.API/     Exchange.API/
 COPY Exchange.Core/    Exchange.Core/
 COPY Exchange.TestRunner/ Exchange.TestRunner/
+COPY Exchange.Tests/   Exchange.Tests/
+
 
 # Build and publish in Release mode
 RUN dotnet publish Exchange.API/Exchange.API.csproj \
