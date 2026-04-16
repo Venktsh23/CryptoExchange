@@ -9,6 +9,7 @@ using Exchange.API.Hubs;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using Exchange.Core.Accounts;
+using Prometheus;
 
 // Serilog setup
 Log.Logger = new LoggerConfiguration()
@@ -78,6 +79,9 @@ builder.Services.AddHostedService<OutboxPublisherService>();
 
 var app = builder.Build();
 
+
+app.UseStaticFiles(); 
+
 // Auto-migrate database on startup
 using (var scope = app.Services.CreateScope())
 {
@@ -86,6 +90,8 @@ using (var scope = app.Services.CreateScope())
 }
 
 app.UseCors();
+app.UseMetricServer();   // exposes /metrics endpoint
+app.UseHttpMetrics();    // tracks HTTP request metrics automatically
 
 // Wire SignalR broadcast to the order consumer
 var orderConsumer = app.Services

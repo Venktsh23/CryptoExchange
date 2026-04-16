@@ -1,5 +1,50 @@
 services:
 
+  # ─── Your Application ─────────────────────────────────
+  exchange-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: exchange-api
+    ports:
+      - "5000:5000"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Docker
+      - ASPNETCORE_URLS=http://+:5000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs    # logs written to host machine
+    restart: unless-stopped
+    networks:
+      - exchange-network
+
+  # ─── PostgreSQL ───────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_DB:       cryptoexchange
+      POSTGRES_USER:     postgres
+      POSTGRES_PASSWORD: password
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d cryptoexchange"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - exchange-network
+
+  # ─── Kafka ────────────────────────────────────────────
   kafka:
     image: apache/kafka:3.7.0
     container_name: kafka
@@ -9,10 +54,10 @@ services:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
       KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
-      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
@@ -24,25 +69,68 @@ services:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"]
       interval: 10s
       timeout: 10s
-      retries: 5
+      retries: 10
       start_period: 30s
     restart: unless-stopped
+    networks:
+      - exchange-network
 
-  redis:
-    image: redis:alpine
-    container_name: redis
+  # ─── Prometheus ───────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
     ports:
-      - "6379:6379"
+      - "9090:9090"
     volumes:
-      - redis-data:/data
-    command: redis-server --appendonly yes  # AOF persistence — every write saved to disk
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=7d'
     restart: unless-stopped
+    networks:
+      - exchange-network
 
+  # ─── Grafana ──────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    networks:
+      - exchange-network
+
+  # ─── Jaeger (Distributed Tracing) ─────────────────────
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: jaeger
+    ports:
+      - "16686:16686"   # Jaeger UI
+      - "4317:4317"     # OpenTelemetry gRPC
+      - "4318:4318"     # OpenTelemetry HTTP
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    restart: unless-stopped
+    networks:
+      - exchange-network
+
+# ─── Networks ─────────────────────────────────────────────
+networks:
+  exchange-network:
+    driver: bridge
+
+# ─── Volumes ──────────────────────────────────────────────
 volumes:
-  kafka-data:    # Kafka messages survive container restarts
-  redis-data:    # Redis data survives container restarts
+  postgres-data:
+  kafka-data:
+  redis-data:
+  prometheus-data:
+  grafana-data:
