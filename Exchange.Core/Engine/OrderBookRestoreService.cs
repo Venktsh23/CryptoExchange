@@ -89,18 +89,22 @@ public class OrderBookRestoreService : IHostedService
                     pair, ghostCount, partialCount);
             }
 
-            _engine.RestoreFromSnapshot(
+                        _engine.RestoreFromSnapshot(
                 snapshot.TradingPair,
                 pendingBids,
                 pendingAsks);
 
-            var count = snapshot.Bids.Count + snapshot.Asks.Count;
-            restoredOrders += count;
-            restoredPairs++;
+            var actualCount = pendingBids.Count + pendingAsks.Count;
+            restoredOrders += actualCount;
 
             _logger.LogInformation(
-                "RESTORED | {Pair} | {Count} resting orders",
-                pair, count);
+                "RESTORED | {Pair} | {Count} resting orders " +
+                "(snapshot had {SnapshotCount}, removed {Removed} ghosts)",
+                pair,
+                actualCount,
+                snapshot.Bids.Count + snapshot.Asks.Count,
+                (snapshot.Bids.Count + snapshot.Asks.Count) - actualCount);
+                
         }
 
         _logger.LogInformation(
