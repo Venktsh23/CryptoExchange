@@ -1,0 +1,94 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: exchange-api
+  namespace: exchange
+  labels:
+    app: exchange-api
+spec:
+  replicas: 1  # Single instance — matching engine is stateful
+  selector:
+    matchLabels:
+      app: exchange-api
+  template:
+    metadata:
+      labels:
+        app: exchange-api
+    spec:
+      containers:
+      - name: exchange-api
+        image: exchange-api:latest
+        imagePullPolicy: Never  # Use local image in minikube
+        ports:
+        - containerPort: 5000
+        # Load config from ConfigMap
+        envFrom:
+        - configMapRef:
+            name: exchange-config
+        # Load secrets
+        env:
+        - name: ConnectionStrings__Postgres
+          valueFrom:
+            secretKeyRef:
+              name: exchange-secrets
+              key: ConnectionStrings__Postgres
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu:    "500m"
+          limits:
+            memory: "512Mi"
+            cpu:    "1000m"
+        # Liveness — is the process alive?
+        livenessProbe:
+          httpGet:
+            path: /health/live
+            port: 5000
+          initialDelaySeconds: 30
+          periodSeconds:       10
+          failureThreshold:    3
+        # Readiness — is it ready to accept traffic?
+        # K8s won't send traffic until this passes
+        readinessProbe:
+          httpGet:
+            path: /health/ready
+            port: 5000
+          initialDelaySeconds: 15
+          periodSeconds:       5
+          failureThreshold:    3
+---
+# Service — stable network endpoint for the API
+apiVersion: v1
+kind: Service
+metadata:
+  name: exchange-api
+  namespace: exchange
+spec:
+  selector:
+    app: exchange-api
+  ports:
+  - port: 80
+    targetPort: 5000
+  type: ClusterIP
+---
+# Ingress — routes external traffic into the cluster
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: exchange-ingress
+  namespace: exchange
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: exchange.local
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: exchange-api
+            port:
+              number: 80

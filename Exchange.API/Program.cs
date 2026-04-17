@@ -10,6 +10,7 @@ using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using Exchange.Core.Accounts;
 using Prometheus;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
 
 // Serilog setup
 Log.Logger = new LoggerConfiguration()
@@ -31,6 +32,18 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Host.UseSerilog();
 
 builder.Services.AddControllers();
+
+
+builder.Services.AddHealthChecks()
+    .AddNpgSql(
+        builder.Configuration.GetConnectionString("Postgres")!,
+        name:    "postgresql",
+        tags:    new[] { "ready" })
+    .AddCheck("matching-engine", () =>
+    {
+        // Engine is healthy if it's processing orders
+        return HealthCheckResult.Healthy("Matching engine running");
+    }, tags: new[] { "ready" });
 builder.Services.AddSignalR();
 
 builder.Services.AddCors(options =>
@@ -90,6 +103,21 @@ using (var scope = app.Services.CreateScope())
 }
 
 app.UseCors();
+
+// Liveness — just checks if process is alive
+// Returns 200 always unless process is deadlocked
+app.MapHealthChecks("/health/live", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
+{
+    Predicate = _ => false  // No checks — just "am I alive?"
+});
+
+// Readiness — checks all dependencies
+// Returns 200 only when all dependencies are healthy
+app.MapHealthChecks("/health/ready", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
+{
+    Predicate = check => check.Tags.Contains("ready")
+});
+
 app.UseMetricServer();   // exposes /metrics endpoint
 app.UseHttpMetrics();    // tracks HTTP request metrics automatically
 

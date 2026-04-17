@@ -1,0 +1,8 @@
+# Namespace — logical isolation for your app
+# All your resources live in this namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: exchange
+  labels:
+    app: crypto-exchange

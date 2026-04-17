@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: exchange-config
+  namespace: exchange
+data:
+  # Kafka settings
+  Kafka__BootstrapServers:        "kafka:9092"
+  Kafka__OrdersTopic:             "orders"
+  Kafka__TradesTopic:             "trades"
+  Kafka__EngineConsumerGroup:     "matching-engine"
+  Kafka__SettlementConsumerGroup: "settlement-worker"
+
+  # ASP.NET settings
+  ASPNETCORE_ENVIRONMENT:    "Docker"
+  ASPNETCORE_URLS:           "http://+:5000"
+
+  # Logging
+  Logging__LogLevel__Default:                                    "Information"
+  Logging__LogLevel__Microsoft.AspNetCore:                       "Warning"
+  Logging__LogLevel__Microsoft.EntityFrameworkCore.Database.Command: "Warning"
